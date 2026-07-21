@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import csv
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -80,21 +80,36 @@ def format_btc(value: float) -> str:
     return s if s else "0"
 
 
+def _short_date(date_s: str) -> str:
+    try:
+        return datetime.strptime(date_s, "%Y-%m-%d").strftime("%y-%m-%d")
+    except ValueError:
+        return date_s
+
+
 def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
+    """生成 GitHub README 可渲染的累计图。
+
+    说明：
+    - 仅 1 个数据点时纯折线几乎看不见，因此叠加 bar，并补一个 0 起点。
+    - 早期持仓远小于 0.1 时，纵轴按持仓缩放，否则点会贴在坐标轴底部。
+    """
     if not transactions:
         return (
             "```mermaid\n"
             "xychart-beta\n"
-            '    title "冷钱包累计 BTC（暂无数据）"\n'
-            "    x-axis [—]\n"
+            '    title "Cold wallet BTC (no data yet)"\n'
+            '    x-axis ["—"]\n'
             '    y-axis "BTC" 0 --> 0.1\n'
-            "    line [0]\n"
-            "```"
+            "    bar [0]\n"
+            "```\n"
+            "\n"
+            "_暂无数据。添加提现记录并运行 `python scripts/update_readme.py` 后会生成图表。_"
         )
 
     # x 轴标签：日期简写，过多时抽样，避免 README 过长
-    labels = []
-    values = []
+    labels: list[str] = []
+    values: list[float] = []
     n = len(transactions)
     if n <= 24:
         indices = list(range(n))
@@ -105,29 +120,49 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
             indices.append(n - 1)
 
     for i in indices:
-        d = transactions[i]["date"]
-        try:
-            dt = datetime.strptime(d, "%Y-%m-%d")
-            label = dt.strftime("%y-%m-%d")
-        except ValueError:
-            label = d
-        labels.append(label)
+        labels.append(_short_date(transactions[i]["date"]))
         values.append(round(cumulative[i], 8))
 
-    # Mermaid 标签含特殊字符时用引号
-    x_axis = ", ".join(f'"{lb}"' for lb in labels)
-    y_max = max(GOAL_BTC, max(values) * 1.15 if values else GOAL_BTC)
-    y_max = round(y_max, 4)
-    line_vals = ", ".join(str(v) for v in values)
+    # 补 0 起点，让折线在只有 1～2 笔时也有“爬升”形状
+    first_date = transactions[0]["date"]
+    try:
+        first_dt = datetime.strptime(first_date, "%Y-%m-%d")
+        # 起点标在首次提现前一天（仅用于作图，不是真实记录）
+        origin_label = (first_dt - timedelta(days=1)).strftime("%y-%m-%d")
+    except ValueError:
+        origin_label = "start"
+    plot_labels = [origin_label, *labels]
+    plot_values = [0.0, *values]
 
+    data_max = max(plot_values) if plot_values else 0.0
+    # 早期持仓：放大纵轴，避免 0.005 在 0→0.1 坐标上几乎看不见
+    if data_max <= 0:
+        y_max = GOAL_BTC
+        scale_note = ""
+    elif data_max < GOAL_BTC * 0.3:
+        y_max = round(max(data_max * 2.0, data_max + 0.001, 0.01), 6)
+        scale_note = (
+            f"\n\n_纵轴当前按持仓放大显示（约 0 → {y_max} BTC），"
+            f"便于观察早期增长；最终目标仍为 **{GOAL_BTC} BTC**。_"
+        )
+    else:
+        y_max = GOAL_BTC if data_max <= GOAL_BTC else round(data_max * 1.15, 4)
+        scale_note = f"\n\n_纵轴范围 0 → {y_max} BTC（目标 {GOAL_BTC} BTC）。_"
+
+    x_axis = ", ".join(f'"{lb}"' for lb in plot_labels)
+    series = ", ".join(str(v) for v in plot_values)
+
+    # 标题用英文，兼容部分 Mermaid 渲染环境；中文说明放在图下方
     return (
         "```mermaid\n"
         "xychart-beta\n"
-        '    title "冷钱包累计 BTC"\n'
+        '    title "Cold wallet cumulative BTC"\n'
         f"    x-axis [{x_axis}]\n"
         f'    y-axis "BTC" 0 --> {y_max}\n'
-        f"    line [{line_vals}]\n"
+        f"    bar [{series}]\n"
+        f"    line [{series}]\n"
         "```"
+        f"{scale_note}"
     )
 
 
@@ -136,18 +171,24 @@ def build_table(transactions: list[dict], cumulative: list[float]) -> str:
         return "_暂无记录。请在 `data/transactions.csv` 中添加提现到冷钱包的记录。_"
 
     lines = [
-        "| 日期 | 提现 (BTC) | 累计 (BTC) | 法币金额 | 币种 | 备注 |",
-        "| --- | ---: | ---: | ---: | --- | --- |",
+        "| 日期 | 提现 (BTC) | 累计 (BTC) | 成本 | 均价 | 备注 |",
+        "| --- | ---: | ---: | ---: | ---: | --- |",
     ]
     for t, cum in zip(transactions, cumulative):
-        fiat = (
-            f"{t['fiat_amount']:,.2f}"
-            if t["fiat_amount"] is not None
-            else "—"
-        )
+        if t["fiat_amount"] is not None:
+            cur = t["fiat_currency"] if t["fiat_currency"] != "—" else ""
+            fiat = f"{t['fiat_amount']:,.2f} {cur}".strip()
+            if t["btc"] > 0:
+                unit = t["fiat_amount"] / t["btc"]
+                avg = f"{unit:,.0f} {cur}/BTC".strip()
+            else:
+                avg = "—"
+        else:
+            fiat = "—"
+            avg = "—"
         lines.append(
             f"| {t['date']} | {format_btc(t['btc'])} | {format_btc(cum)} | "
-            f"{fiat} | {t['fiat_currency']} | {t['note']} |"
+            f"{fiat} | {avg} | {t['note']} |"
         )
     return "\n".join(lines)
 
@@ -181,9 +222,15 @@ def build_auto_section(transactions: list[dict]) -> str:
     for cur, amount in sorted(total_fiat_by_currency.items()):
         if total > 0:
             avg = amount / total
-            avg_cost_lines.append(
-                f"- **平均成本 ({cur}/BTC)**: {avg:,.2f}"
-            )
+            # USD 均价按常见报价取整展示（如 $72040）
+            if cur.upper() == "USD":
+                avg_cost_lines.append(
+                    f"- **平均成本 (USD/BTC)**: ${avg:,.0f}"
+                )
+            else:
+                avg_cost_lines.append(
+                    f"- **平均成本 ({cur}/BTC)**: {avg:,.2f}"
+                )
 
     updated = datetime.now().strftime("%Y-%m-%d %H:%M")
 
