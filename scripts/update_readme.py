@@ -19,6 +19,8 @@ README_PATH = ROOT / "README.md"
 GOAL_BTC = 0.1
 # 图表 0 起点：首次购买比特币的日期（作图用，不计入提现明细）
 CHART_ORIGIN_DATE = "2026-03-27"
+# 图表横轴最右端：计划达成 0.1 BTC 的目标日期
+CHART_TARGET_DATE = "2029-06-01"
 
 MARKER_START = "<!-- AUTO-GENERATED:START -->"
 MARKER_END = "<!-- AUTO-GENERATED:END -->"
@@ -94,21 +96,26 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
 
     说明：
     - 以首次购买日 CHART_ORIGIN_DATE 作为 0 起点（作图用，不计入提现明细）。
-    - 早期持仓远小于 0.1 时，纵轴按持仓缩放，否则点会贴在坐标轴底部。
+    - 横轴最右端固定为 CHART_TARGET_DATE（计划达成目标的日期）。
+    - 纵轴固定为 0 → GOAL_BTC，不按持仓放大。
     - 仅使用 line，不叠加柱状图。
     """
+    target_label = _short_date(CHART_TARGET_DATE)
+    y_max = GOAL_BTC
+
     if not transactions:
         origin = _short_date(CHART_ORIGIN_DATE)
         return (
             "```mermaid\n"
             "xychart-beta\n"
             '    title "Cold wallet cumulative BTC"\n'
-            f'    x-axis ["{origin}"]\n'
-            '    y-axis "BTC" 0 --> 0.1\n'
-            "    line [0]\n"
+            f'    x-axis ["{origin}", "{target_label}"]\n'
+            f'    y-axis "BTC" 0 --> {y_max}\n'
+            f"    line [0, {GOAL_BTC}]\n"
             "```\n"
             "\n"
-            f"_暂无冷钱包提现数据。图表起点为首次购买日 `{CHART_ORIGIN_DATE}`。_"
+            f"_暂无冷钱包提现数据。图表起点为首次购买日 `{CHART_ORIGIN_DATE}`，"
+            f"横轴最右端为目标日 `{CHART_TARGET_DATE}`（{GOAL_BTC} BTC）。_"
         )
 
     # x 轴标签：日期简写，过多时抽样，避免 README 过长
@@ -137,24 +144,22 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
         plot_labels = [origin_label, *labels]
         plot_values = [0.0, *values]
 
-    data_max = max(plot_values) if plot_values else 0.0
-    # 早期持仓：放大纵轴，避免 0.005 在 0→0.1 坐标上几乎看不见
-    if data_max <= 0:
-        y_max = GOAL_BTC
-        scale_note = ""
-    elif data_max < GOAL_BTC * 0.3:
-        y_max = round(max(data_max * 2.0, data_max + 0.001, 0.01), 6)
-        scale_note = (
-            f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`（累计 0，尚未提现到冷钱包）。"
-            f"纵轴当前按持仓放大显示（约 0 → {y_max} BTC）；"
-            f"最终目标仍为 **{GOAL_BTC} BTC**。_"
-        )
-    else:
-        y_max = GOAL_BTC if data_max <= GOAL_BTC else round(data_max * 1.15, 4)
-        scale_note = (
-            f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`；"
-            f"纵轴范围 0 → {y_max} BTC（目标 {GOAL_BTC} BTC）。_"
-        )
+    # 横轴最右端：目标达成日；线末端标为 GOAL_BTC，表示计划终点
+    last_tx_date = transactions[-1]["date"]
+    if last_tx_date < CHART_TARGET_DATE and plot_labels[-1] != target_label:
+        plot_labels.append(target_label)
+        plot_values.append(GOAL_BTC)
+    elif last_tx_date >= CHART_TARGET_DATE:
+        # 已到或超过目标日：纵轴仍按目标上限（或略高于实际持仓）
+        data_max = max(plot_values) if plot_values else 0.0
+        if data_max > GOAL_BTC:
+            y_max = round(data_max * 1.05, 4)
+
+    scale_note = (
+        f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`（累计 0，尚未提现到冷钱包）；"
+        f"横轴最右端为目标日 `{CHART_TARGET_DATE}`；"
+        f"纵轴固定 0 → {y_max} BTC（目标 **{GOAL_BTC} BTC**）。_"
+    )
 
     x_axis = ", ".join(f'"{lb}"' for lb in plot_labels)
     series = ", ".join(str(v) for v in plot_values)
