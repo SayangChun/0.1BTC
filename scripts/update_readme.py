@@ -10,16 +10,18 @@ from __future__ import annotations
 
 import csv
 import re
-from datetime import datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
+from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data" / "transactions.csv"
 README_PATH = ROOT / "README.md"
+CHART_SVG_PATH = ROOT / "assets" / "cumulative_btc.svg"
 GOAL_BTC = 0.1
 # 图表 0 起点：首次购买比特币的日期（作图用，不计入提现明细）
 CHART_ORIGIN_DATE = "2026-03-27"
-# 图表横轴最右端：计划达成 0.1 BTC 的目标日期
+# 图表横轴最右端：计划达成 0.1 BTC 的目标日期（仅作轴端，不绘制数据点）
 CHART_TARGET_DATE = "2029-06-01"
 
 MARKER_START = "<!-- AUTO-GENERATED:START -->"
@@ -84,96 +86,185 @@ def format_btc(value: float) -> str:
     return s if s else "0"
 
 
+def _parse_date(date_s: str) -> date:
+    return datetime.strptime(date_s, "%Y-%m-%d").date()
+
+
 def _short_date(date_s: str) -> str:
     try:
-        return datetime.strptime(date_s, "%Y-%m-%d").strftime("%y-%m-%d")
+        return _parse_date(date_s).strftime("%y-%m-%d")
     except ValueError:
         return date_s
 
 
-def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
-    """生成 GitHub README 可渲染的累计折线图。
+def _fmt_tick(d: date) -> str:
+    return d.strftime("%y-%m-%d")
 
-    说明：
-    - 以首次购买日 CHART_ORIGIN_DATE 作为 0 起点（作图用，不计入提现明细）。
-    - 横轴最右端固定为 CHART_TARGET_DATE（计划达成目标的日期）。
-    - 纵轴固定为 0 → GOAL_BTC，不按持仓放大。
-    - 仅使用 line，不叠加柱状图。
+
+def write_chart_svg(transactions: list[dict], cumulative: list[float], path: Path) -> None:
+    """按真实时间比例绘制累计折线 SVG。
+
+    - 横轴：CHART_ORIGIN_DATE → CHART_TARGET_DATE（线性时间）
+    - 目标日仅作为轴右端，不绘制任何数据点/线终点
+    - 纵轴固定 0 → GOAL_BTC
+    - 仅绘制起点与实际提现累计点（阶梯/折线连接）
     """
-    target_label = _short_date(CHART_TARGET_DATE)
-    y_max = GOAL_BTC
+    origin = _parse_date(CHART_ORIGIN_DATE)
+    target = _parse_date(CHART_TARGET_DATE)
+    if target <= origin:
+        raise ValueError("CHART_TARGET_DATE must be after CHART_ORIGIN_DATE")
 
-    if not transactions:
-        origin = _short_date(CHART_ORIGIN_DATE)
-        return (
-            "```mermaid\n"
-            "xychart-beta\n"
-            '    title "Cold wallet cumulative BTC"\n'
-            f'    x-axis ["{origin}", "{target_label}"]\n'
-            f'    y-axis "BTC" 0 --> {y_max}\n'
-            f"    line [0, {GOAL_BTC}]\n"
-            "```\n"
-            "\n"
-            f"_暂无冷钱包提现数据。图表起点为首次购买日 `{CHART_ORIGIN_DATE}`，"
-            f"横轴最右端为目标日 `{CHART_TARGET_DATE}`（{GOAL_BTC} BTC）。_"
+    y_max = GOAL_BTC
+    if cumulative:
+        data_max = max(cumulative)
+        if data_max > y_max:
+            y_max = data_max * 1.05
+
+    # 绘图点：起点 0 + 每笔提现后的累计（不包含目标日）
+    points: list[tuple[date, float]] = [(origin, 0.0)]
+    for t, cum in zip(transactions, cumulative):
+        d = _parse_date(t["date"])
+        if d < origin:
+            continue
+        # 同一天多笔：保留最后累计
+        if points and points[-1][0] == d:
+            points[-1] = (d, cum)
+        else:
+            points.append((d, cum))
+
+    # 若最后数据日晚于目标日，仍绘制该点，但轴域至少覆盖数据
+    axis_end = target
+    if points:
+        axis_end = max(target, points[-1][0])
+
+    total_days = (axis_end - origin).days
+    if total_days <= 0:
+        total_days = 1
+
+    # 画布与边距
+    width, height = 920, 420
+    margin_left, margin_right = 64, 28
+    margin_top, margin_bottom = 48, 56
+    plot_w = width - margin_left - margin_right
+    plot_h = height - margin_top - margin_bottom
+
+    def x_of(d: date) -> float:
+        return margin_left + ((d - origin).days / total_days) * plot_w
+
+    def y_of(v: float) -> float:
+        v = max(0.0, min(v, y_max))
+        return margin_top + plot_h * (1.0 - v / y_max)
+
+    # 折线路径（按真实日期位置）
+    if len(points) == 1:
+        # 仅起点：画一个点
+        path_d = ""
+    else:
+        path_parts: list[str] = []
+        for i, (d, v) in enumerate(points):
+            cmd = "M" if i == 0 else "L"
+            path_parts.append(f"{cmd}{x_of(d):.2f},{y_of(v):.2f}")
+        path_d = " ".join(path_parts)
+
+    # Y 轴刻度
+    y_ticks = 5
+    y_tick_elems: list[str] = []
+    for i in range(y_ticks + 1):
+        val = y_max * i / y_ticks
+        y = y_of(val)
+        label = f"{val:.3f}".rstrip("0").rstrip(".")
+        y_tick_elems.append(
+            f'<line x1="{margin_left}" y1="{y:.2f}" '
+            f'x2="{margin_left + plot_w}" y2="{y:.2f}" '
+            f'stroke="#e5e7eb" stroke-width="1"/>'
+            f'<line x1="{margin_left - 5}" y1="{y:.2f}" '
+            f'x2="{margin_left}" y2="{y:.2f}" stroke="#6b7280" stroke-width="1"/>'
+            f'<text x="{margin_left - 10}" y="{y + 4:.2f}" text-anchor="end" '
+            f'font-size="11" fill="#4b5563" font-family="Segoe UI, Helvetica, Arial, sans-serif">'
+            f"{escape(label)}</text>"
         )
 
-    # x 轴标签：日期简写，过多时抽样，避免 README 过长
-    labels: list[str] = []
-    values: list[float] = []
-    n = len(transactions)
-    if n <= 24:
-        indices = list(range(n))
-    else:
-        step = max(1, (n - 1) // 23)
-        indices = list(range(0, n, step))
-        if indices[-1] != n - 1:
-            indices.append(n - 1)
+    # X 轴刻度：起点、若干均匀时间点、目标日（最右端）
+    x_tick_dates: list[date] = [origin]
+    # 大约 4 个中间刻度
+    for i in range(1, 5):
+        d = origin + timedelta(days=round(total_days * i / 5))
+        if origin < d < axis_end:
+            x_tick_dates.append(d)
+    if axis_end not in x_tick_dates:
+        x_tick_dates.append(axis_end)
+    # 去重并排序
+    x_tick_dates = sorted(set(x_tick_dates))
 
-    for i in indices:
-        labels.append(_short_date(transactions[i]["date"]))
-        values.append(round(cumulative[i], 8))
+    x_tick_elems: list[str] = []
+    for d in x_tick_dates:
+        x = x_of(d)
+        x_tick_elems.append(
+            f'<line x1="{x:.2f}" y1="{margin_top + plot_h}" '
+            f'x2="{x:.2f}" y2="{margin_top + plot_h + 5}" '
+            f'stroke="#6b7280" stroke-width="1"/>'
+            f'<text x="{x:.2f}" y="{margin_top + plot_h + 22}" text-anchor="middle" '
+            f'font-size="11" fill="#4b5563" font-family="Segoe UI, Helvetica, Arial, sans-serif">'
+            f"{escape(_fmt_tick(d))}</text>"
+        )
 
-    # 0 起点：首次购买比特币日期（仅作图；冷钱包在该日尚未入账）
-    origin_label = _short_date(CHART_ORIGIN_DATE)
-    # 若第一笔提现日期与起点相同，避免重复标签
-    if labels and labels[0] == origin_label:
-        plot_labels = labels
-        plot_values = values
-    else:
-        plot_labels = [origin_label, *labels]
-        plot_values = [0.0, *values]
+    # 数据点
+    point_elems: list[str] = []
+    for d, v in points:
+        point_elems.append(
+            f'<circle cx="{x_of(d):.2f}" cy="{y_of(v):.2f}" r="3.5" '
+            f'fill="#2563eb" stroke="#ffffff" stroke-width="1.5"/>'
+        )
 
-    # 横轴最右端：目标达成日；线末端标为 GOAL_BTC，表示计划终点
-    last_tx_date = transactions[-1]["date"]
-    if last_tx_date < CHART_TARGET_DATE and plot_labels[-1] != target_label:
-        plot_labels.append(target_label)
-        plot_values.append(GOAL_BTC)
-    elif last_tx_date >= CHART_TARGET_DATE:
-        # 已到或超过目标日：纵轴仍按目标上限（或略高于实际持仓）
-        data_max = max(plot_values) if plot_values else 0.0
-        if data_max > GOAL_BTC:
-            y_max = round(data_max * 1.05, 4)
+    title = "Cold wallet cumulative BTC"
+    svg = f'''<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}">
+  <rect width="100%" height="100%" fill="#ffffff"/>
+  <text x="{width / 2:.1f}" y="28" text-anchor="middle" font-size="16" font-weight="600"
+        fill="#111827" font-family="Segoe UI, Helvetica, Arial, sans-serif">{escape(title)}</text>
+  <!-- grid + y ticks -->
+  {"".join(y_tick_elems)}
+  <!-- axes -->
+  <line x1="{margin_left}" y1="{margin_top}" x2="{margin_left}" y2="{margin_top + plot_h}"
+        stroke="#374151" stroke-width="1.5"/>
+  <line x1="{margin_left}" y1="{margin_top + plot_h}" x2="{margin_left + plot_w}" y2="{margin_top + plot_h}"
+        stroke="#374151" stroke-width="1.5"/>
+  <!-- x ticks -->
+  {"".join(x_tick_elems)}
+  <!-- y axis title -->
+  <text x="16" y="{margin_top + plot_h / 2:.1f}" text-anchor="middle" font-size="12" fill="#374151"
+        font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        transform="rotate(-90 16 {margin_top + plot_h / 2:.1f})">BTC</text>
+  <!-- line -->
+  {f'<path d="{path_d}" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>' if path_d else ""}
+  <!-- points -->
+  {"".join(point_elems)}
+</svg>
+'''
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(svg, encoding="utf-8")
 
-    scale_note = (
+
+def chart_markdown(transactions: list[dict], cumulative: list[float]) -> str:
+    """写入 SVG 并返回 README 中引用图表的 Markdown。"""
+    write_chart_svg(transactions, cumulative, CHART_SVG_PATH)
+    # 相对路径，便于 GitHub 渲染；加 query 避免缓存旧图（用数据摘要）
+    total = cumulative[-1] if cumulative else 0.0
+    cache_bust = f"{len(transactions)}-{format_btc(total)}-{CHART_TARGET_DATE}"
+    rel = CHART_SVG_PATH.relative_to(ROOT).as_posix()
+    note = (
         f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`（累计 0，尚未提现到冷钱包）；"
-        f"横轴最右端为目标日 `{CHART_TARGET_DATE}`；"
-        f"纵轴固定 0 → {y_max} BTC（目标 **{GOAL_BTC} BTC**）。_"
+        f"横轴按真实时间比例，最右端为目标日 `{CHART_TARGET_DATE}`（**不绘制**数据点）；"
+        f"纵轴固定 0 → {GOAL_BTC} BTC。_"
     )
-
-    x_axis = ", ".join(f'"{lb}"' for lb in plot_labels)
-    series = ", ".join(str(v) for v in plot_values)
-
-    # 标题用英文，兼容部分 Mermaid 渲染环境；中文说明放在图下方
+    if not transactions:
+        note = (
+            f"\n\n_暂无冷钱包提现数据。图表起点为首次购买日 `{CHART_ORIGIN_DATE}`，"
+            f"横轴最右端为目标日 `{CHART_TARGET_DATE}`（仅作轴端）。_"
+        )
     return (
-        "```mermaid\n"
-        "xychart-beta\n"
-        '    title "Cold wallet cumulative BTC"\n'
-        f"    x-axis [{x_axis}]\n"
-        f'    y-axis "BTC" 0 --> {y_max}\n'
-        f"    line [{series}]\n"
-        "```"
-        f"{scale_note}"
+        f'![Cold wallet cumulative BTC]({rel}?v={cache_bust})\n'
+        f"{note}"
     )
 
 
@@ -262,7 +353,7 @@ def build_auto_section(transactions: list[dict]) -> str:
         "",
         "## 冷钱包累计曲线",
         "",
-        mermaid_chart(transactions, cumulative),
+        chart_markdown(transactions, cumulative),
         "",
         "## 提现明细",
         "",
