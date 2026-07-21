@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-从 data/transactions.csv 读取囤币记录，更新 README.md 中的进度与图表。
+从 data/transactions.csv 读取冷钱包提现记录，更新 README.md 中的进度与图表。
 
 用法（在项目根目录执行）:
   python scripts/update_readme.py
@@ -85,7 +85,7 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
         return (
             "```mermaid\n"
             "xychart-beta\n"
-            '    title "累计持有 BTC（暂无数据）"\n'
+            '    title "冷钱包累计 BTC（暂无数据）"\n'
             "    x-axis [—]\n"
             '    y-axis "BTC" 0 --> 0.1\n'
             "    line [0]\n"
@@ -123,7 +123,7 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
     return (
         "```mermaid\n"
         "xychart-beta\n"
-        '    title "累计持有 BTC"\n'
+        '    title "冷钱包累计 BTC"\n'
         f"    x-axis [{x_axis}]\n"
         f'    y-axis "BTC" 0 --> {y_max}\n'
         f"    line [{line_vals}]\n"
@@ -133,10 +133,10 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
 
 def build_table(transactions: list[dict], cumulative: list[float]) -> str:
     if not transactions:
-        return "_暂无记录。请在 `data/transactions.csv` 中添加买入记录。_"
+        return "_暂无记录。请在 `data/transactions.csv` 中添加提现到冷钱包的记录。_"
 
     lines = [
-        "| 日期 | 买入 (BTC) | 累计 (BTC) | 法币金额 | 币种 | 备注 |",
+        "| 日期 | 提现 (BTC) | 累计 (BTC) | 法币金额 | 币种 | 备注 |",
         "| --- | ---: | ---: | ---: | --- | --- |",
     ]
     for t, cum in zip(transactions, cumulative):
@@ -196,17 +196,17 @@ def build_auto_section(transactions: list[dict]) -> str:
         "",
         f"`{bar}`",
         "",
-        f"- **当前持有**: {format_btc(total)} BTC",
+        f"- **冷钱包累计**: {format_btc(total)} BTC",
         f"- **距离目标还差**: {format_btc(remaining)} BTC",
-        f"- **买入笔数**: {len(transactions)}",
+        f"- **提现笔数**: {len(transactions)}",
         *fiat_lines,
         *avg_cost_lines,
         "",
-        "## 累计持有曲线",
+        "## 冷钱包累计曲线",
         "",
         mermaid_chart(transactions, cumulative),
         "",
-        "## 买入明细",
+        "## 提现明细",
         "",
         build_table(transactions, cumulative),
         "",
