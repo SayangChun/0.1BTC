@@ -10,13 +10,15 @@ from __future__ import annotations
 
 import csv
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data" / "transactions.csv"
 README_PATH = ROOT / "README.md"
 GOAL_BTC = 0.1
+# 图表 0 起点：首次购买比特币的日期（作图用，不计入提现明细）
+CHART_ORIGIN_DATE = "2026-03-27"
 
 MARKER_START = "<!-- AUTO-GENERATED:START -->"
 MARKER_END = "<!-- AUTO-GENERATED:END -->"
@@ -88,23 +90,25 @@ def _short_date(date_s: str) -> str:
 
 
 def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
-    """生成 GitHub README 可渲染的累计图。
+    """生成 GitHub README 可渲染的累计折线图。
 
     说明：
-    - 仅 1 个数据点时纯折线几乎看不见，因此叠加 bar，并补一个 0 起点。
+    - 以首次购买日 CHART_ORIGIN_DATE 作为 0 起点（作图用，不计入提现明细）。
     - 早期持仓远小于 0.1 时，纵轴按持仓缩放，否则点会贴在坐标轴底部。
+    - 仅使用 line，不叠加柱状图。
     """
     if not transactions:
+        origin = _short_date(CHART_ORIGIN_DATE)
         return (
             "```mermaid\n"
             "xychart-beta\n"
-            '    title "Cold wallet BTC (no data yet)"\n'
-            '    x-axis ["—"]\n'
+            '    title "Cold wallet cumulative BTC"\n'
+            f'    x-axis ["{origin}"]\n'
             '    y-axis "BTC" 0 --> 0.1\n'
-            "    bar [0]\n"
+            "    line [0]\n"
             "```\n"
             "\n"
-            "_暂无数据。添加提现记录并运行 `python scripts/update_readme.py` 后会生成图表。_"
+            f"_暂无冷钱包提现数据。图表起点为首次购买日 `{CHART_ORIGIN_DATE}`。_"
         )
 
     # x 轴标签：日期简写，过多时抽样，避免 README 过长
@@ -123,16 +127,15 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
         labels.append(_short_date(transactions[i]["date"]))
         values.append(round(cumulative[i], 8))
 
-    # 补 0 起点，让折线在只有 1～2 笔时也有“爬升”形状
-    first_date = transactions[0]["date"]
-    try:
-        first_dt = datetime.strptime(first_date, "%Y-%m-%d")
-        # 起点标在首次提现前一天（仅用于作图，不是真实记录）
-        origin_label = (first_dt - timedelta(days=1)).strftime("%y-%m-%d")
-    except ValueError:
-        origin_label = "start"
-    plot_labels = [origin_label, *labels]
-    plot_values = [0.0, *values]
+    # 0 起点：首次购买比特币日期（仅作图；冷钱包在该日尚未入账）
+    origin_label = _short_date(CHART_ORIGIN_DATE)
+    # 若第一笔提现日期与起点相同，避免重复标签
+    if labels and labels[0] == origin_label:
+        plot_labels = labels
+        plot_values = values
+    else:
+        plot_labels = [origin_label, *labels]
+        plot_values = [0.0, *values]
 
     data_max = max(plot_values) if plot_values else 0.0
     # 早期持仓：放大纵轴，避免 0.005 在 0→0.1 坐标上几乎看不见
@@ -142,12 +145,16 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
     elif data_max < GOAL_BTC * 0.3:
         y_max = round(max(data_max * 2.0, data_max + 0.001, 0.01), 6)
         scale_note = (
-            f"\n\n_纵轴当前按持仓放大显示（约 0 → {y_max} BTC），"
-            f"便于观察早期增长；最终目标仍为 **{GOAL_BTC} BTC**。_"
+            f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`（累计 0，尚未提现到冷钱包）。"
+            f"纵轴当前按持仓放大显示（约 0 → {y_max} BTC）；"
+            f"最终目标仍为 **{GOAL_BTC} BTC**。_"
         )
     else:
         y_max = GOAL_BTC if data_max <= GOAL_BTC else round(data_max * 1.15, 4)
-        scale_note = f"\n\n_纵轴范围 0 → {y_max} BTC（目标 {GOAL_BTC} BTC）。_"
+        scale_note = (
+            f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`；"
+            f"纵轴范围 0 → {y_max} BTC（目标 {GOAL_BTC} BTC）。_"
+        )
 
     x_axis = ", ".join(f'"{lb}"' for lb in plot_labels)
     series = ", ".join(str(v) for v in plot_values)
@@ -159,7 +166,6 @@ def mermaid_chart(transactions: list[dict], cumulative: list[float]) -> str:
         '    title "Cold wallet cumulative BTC"\n'
         f"    x-axis [{x_axis}]\n"
         f'    y-axis "BTC" 0 --> {y_max}\n'
-        f"    bar [{series}]\n"
         f"    line [{series}]\n"
         "```"
         f"{scale_note}"
