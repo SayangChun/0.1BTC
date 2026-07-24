@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-从 data/transactions.csv 读取冷钱包提现记录，更新 README.md 中的进度与图表。
+从 data/transactions.csv 读取冷钱包提现记录，
+从 data/holdings.csv 读取全部持仓快照，
+更新 README.md 中的进度、持仓表与图表。
 
 用法（在项目根目录执行）:
   python scripts/update_readme.py
@@ -16,6 +18,7 @@ from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data" / "transactions.csv"
+HOLDINGS_CSV_PATH = ROOT / "data" / "holdings.csv"
 README_PATH = ROOT / "README.md"
 CHART_SVG_PATH = ROOT / "assets" / "cumulative_btc.svg"
 GOAL_BTC = 0.1
@@ -27,14 +30,24 @@ CHART_TARGET_DATE = "2029-06-01"
 MARKER_START = "<!-- AUTO-GENERATED:START -->"
 MARKER_END = "<!-- AUTO-GENERATED:END -->"
 
+# holdings.csv 中 location 字段的展示名
+LOCATION_LABELS: dict[str, str] = {
+    "cold": "冷钱包",
+    "exchange": "交易所",
+    "hot": "热钱包",
+    "other": "其他",
+}
 
-def load_transactions(path: Path) -> list[dict]:
-    rows: list[dict] = []
+# 表格中位置的展示顺序
+LOCATION_ORDER = ("cold", "exchange", "hot", "other")
+
+
+def _read_csv_rows(path: Path) -> list[dict[str, str]]:
+    """读取 CSV，跳过空行与 # 注释行，返回原始字段 dict 列表。"""
     if not path.exists():
-        return rows
+        return []
 
     with path.open(encoding="utf-8-sig", newline="") as f:
-        # 跳过空行与 # 注释行
         lines = []
         for line in f:
             stripped = line.strip()
@@ -43,10 +56,14 @@ def load_transactions(path: Path) -> list[dict]:
             lines.append(line)
 
     if not lines:
-        return rows
+        return []
 
-    reader = csv.DictReader(lines)
-    for raw in reader:
+    return list(csv.DictReader(lines))
+
+
+def load_transactions(path: Path) -> list[dict]:
+    rows: list[dict] = []
+    for raw in _read_csv_rows(path):
         date_s = (raw.get("date") or "").strip()
         btc_s = (raw.get("btc") or "").strip()
         if not date_s or not btc_s:
@@ -72,6 +89,77 @@ def load_transactions(path: Path) -> list[dict]:
 
     rows.sort(key=lambda r: r["date"])
     return rows
+
+
+def load_holdings(path: Path) -> list[dict]:
+    """加载持仓快照。同一 location 多条时，取 date 最新的一条。"""
+    by_location: dict[str, dict] = {}
+    for raw in _read_csv_rows(path):
+        date_s = (raw.get("date") or "").strip()
+        loc = (raw.get("location") or "").strip().lower()
+        btc_s = (raw.get("btc") or "").strip()
+        if not date_s or not loc or not btc_s:
+            continue
+        try:
+            btc = float(btc_s)
+        except ValueError:
+            continue
+        row = {
+            "date": date_s,
+            "location": loc,
+            "btc": btc,
+            "note": (raw.get("note") or "").strip() or "—",
+        }
+        prev = by_location.get(loc)
+        if prev is None or date_s >= prev["date"]:
+            by_location[loc] = row
+
+    def sort_key(r: dict) -> tuple:
+        loc = r["location"]
+        try:
+            idx = LOCATION_ORDER.index(loc)
+        except ValueError:
+            idx = len(LOCATION_ORDER)
+        return (idx, loc)
+
+    return sorted(by_location.values(), key=sort_key)
+
+
+def load_holdings_series(path: Path) -> list[tuple[str, float]]:
+    """按日期汇总全部持仓时序。
+
+    同一日期更新若干 location；未出现在当日的 location 沿用上一次余额（carry-forward）。
+    返回 [(date_str, total_btc), ...]，按日期升序，每个日期一点。
+    """
+    raw_rows: list[tuple[str, str, float]] = []
+    for raw in _read_csv_rows(path):
+        date_s = (raw.get("date") or "").strip()
+        loc = (raw.get("location") or "").strip().lower()
+        btc_s = (raw.get("btc") or "").strip()
+        if not date_s or not loc or not btc_s:
+            continue
+        try:
+            btc = float(btc_s)
+        except ValueError:
+            continue
+        raw_rows.append((date_s, loc, btc))
+
+    if not raw_rows:
+        return []
+
+    raw_rows.sort(key=lambda r: (r[0], r[1]))
+    balances: dict[str, float] = {}
+    series: list[tuple[str, float]] = []
+    i = 0
+    n = len(raw_rows)
+    while i < n:
+        d = raw_rows[i][0]
+        while i < n and raw_rows[i][0] == d:
+            _, loc, btc = raw_rows[i]
+            balances[loc] = btc
+            i += 1
+        series.append((d, sum(balances.values())))
+    return series
 
 
 def progress_bar(ratio: float, width: int = 20) -> str:
@@ -101,50 +189,106 @@ def _fmt_tick(d: date) -> str:
     return d.strftime("%y-%m-%d")
 
 
-def write_chart_svg(transactions: list[dict], cumulative: list[float], path: Path) -> None:
+COLOR_COLD = "#2563eb"  # 蓝：冷钱包累计
+COLOR_TOTAL = "#ea580c"  # 橙：全部持仓
+COLOR_DCA = "#9ca3af"  # 灰虚线：定投参考（起点 0 → 目标日 0.1）
+
+
+def _series_to_points(
+    origin: date,
+    series: list[tuple[date, float]],
+) -> list[tuple[date, float]]:
+    """在 series 前补起点 (origin, 0)；同日保留最后值。"""
+    points: list[tuple[date, float]] = [(origin, 0.0)]
+    for d, v in series:
+        if d < origin:
+            continue
+        if points and points[-1][0] == d:
+            points[-1] = (d, v)
+        else:
+            points.append((d, v))
+    return points
+
+
+def _path_d(
+    points: list[tuple[date, float]],
+    x_of,
+    y_of,
+) -> str:
+    if len(points) < 2:
+        return ""
+    parts: list[str] = []
+    for i, (d, v) in enumerate(points):
+        cmd = "M" if i == 0 else "L"
+        parts.append(f"{cmd}{x_of(d):.2f},{y_of(v):.2f}")
+    return " ".join(parts)
+
+
+def _point_elems(
+    points: list[tuple[date, float]],
+    x_of,
+    y_of,
+    fill: str,
+) -> list[str]:
+    elems: list[str] = []
+    for d, v in points:
+        elems.append(
+            f'<circle cx="{x_of(d):.2f}" cy="{y_of(v):.2f}" r="3.5" '
+            f'fill="{fill}" stroke="#ffffff" stroke-width="1.5"/>'
+        )
+    return elems
+
+
+def write_chart_svg(
+    transactions: list[dict],
+    cumulative: list[float],
+    holdings_series: list[tuple[str, float]],
+    path: Path,
+) -> None:
     """按真实时间比例绘制累计折线 SVG。
 
     - 横轴：CHART_ORIGIN_DATE → CHART_TARGET_DATE（线性时间）
     - 目标日仅作为轴右端，不绘制任何数据点/线终点
-    - 纵轴固定 0 → GOAL_BTC
-    - 仅绘制起点与实际提现累计点（阶梯/折线连接）
+    - 纵轴固定 0 → GOAL_BTC（若数据更高则上扩）
+    - 蓝线：冷钱包累计；橙线：全部持仓（holdings 快照时序）
+    - 灰虚线：定投参考（绘图区左下角 → 右上角，线性进度）
     """
     origin = _parse_date(CHART_ORIGIN_DATE)
     target = _parse_date(CHART_TARGET_DATE)
     if target <= origin:
         raise ValueError("CHART_TARGET_DATE must be after CHART_ORIGIN_DATE")
 
+    cold_series: list[tuple[date, float]] = []
+    for t, cum in zip(transactions, cumulative):
+        cold_series.append((_parse_date(t["date"]), cum))
+
+    total_series: list[tuple[date, float]] = []
+    for date_s, total in holdings_series:
+        total_series.append((_parse_date(date_s), total))
+
+    cold_points = _series_to_points(origin, cold_series)
+    total_points = _series_to_points(origin, total_series)
+
     y_max = GOAL_BTC
-    if cumulative:
-        data_max = max(cumulative)
+    data_vals = [v for _, v in cold_points] + [v for _, v in total_points]
+    if data_vals:
+        data_max = max(data_vals)
         if data_max > y_max:
             y_max = data_max * 1.05
 
-    # 绘图点：起点 0 + 每笔提现后的累计（不包含目标日）
-    points: list[tuple[date, float]] = [(origin, 0.0)]
-    for t, cum in zip(transactions, cumulative):
-        d = _parse_date(t["date"])
-        if d < origin:
-            continue
-        # 同一天多笔：保留最后累计
-        if points and points[-1][0] == d:
-            points[-1] = (d, cum)
-        else:
-            points.append((d, cum))
-
-    # 若最后数据日晚于目标日，仍绘制该点，但轴域至少覆盖数据
     axis_end = target
-    if points:
-        axis_end = max(target, points[-1][0])
+    for pts in (cold_points, total_points):
+        if pts:
+            axis_end = max(axis_end, pts[-1][0])
 
     total_days = (axis_end - origin).days
     if total_days <= 0:
         total_days = 1
 
-    # 画布与边距
-    width, height = 920, 420
+    # 画布与边距（略增顶边放图例）
+    width, height = 920, 460
     margin_left, margin_right = 64, 28
-    margin_top, margin_bottom = 48, 56
+    margin_top, margin_bottom = 56, 56
     plot_w = width - margin_left - margin_right
     plot_h = height - margin_top - margin_bottom
 
@@ -155,16 +299,21 @@ def write_chart_svg(transactions: list[dict], cumulative: list[float], path: Pat
         v = max(0.0, min(v, y_max))
         return margin_top + plot_h * (1.0 - v / y_max)
 
-    # 折线路径（按真实日期位置）
-    if len(points) == 1:
-        # 仅起点：画一个点
-        path_d = ""
-    else:
-        path_parts: list[str] = []
-        for i, (d, v) in enumerate(points):
-            cmd = "M" if i == 0 else "L"
-            path_parts.append(f"{cmd}{x_of(d):.2f},{y_of(v):.2f}")
-        path_d = " ".join(path_parts)
+    cold_path = _path_d(cold_points, x_of, y_of)
+    total_path = _path_d(total_points, x_of, y_of)
+
+    # 定投参考：绘图区左下角 (0,0) → 右上角 (axis_end, y_max)
+    # 在默认域（起点→目标日、0→0.1）下即理想线性进度线
+    dca_x1 = margin_left
+    dca_y1 = margin_top + plot_h
+    dca_x2 = margin_left + plot_w
+    dca_y2 = margin_top
+    dca_line = (
+        f'<line x1="{dca_x1:.2f}" y1="{dca_y1:.2f}" '
+        f'x2="{dca_x2:.2f}" y2="{dca_y2:.2f}" '
+        f'stroke="{COLOR_DCA}" stroke-width="1.75" stroke-dasharray="7 5" '
+        f'stroke-linecap="round"/>'
+    )
 
     # Y 轴刻度
     y_ticks = 5
@@ -186,14 +335,12 @@ def write_chart_svg(transactions: list[dict], cumulative: list[float], path: Pat
 
     # X 轴刻度：起点、若干均匀时间点、目标日（最右端）
     x_tick_dates: list[date] = [origin]
-    # 大约 4 个中间刻度
     for i in range(1, 5):
         d = origin + timedelta(days=round(total_days * i / 5))
         if origin < d < axis_end:
             x_tick_dates.append(d)
     if axis_end not in x_tick_dates:
         x_tick_dates.append(axis_end)
-    # 去重并排序
     x_tick_dates = sorted(set(x_tick_dates))
 
     x_tick_elems: list[str] = []
@@ -208,15 +355,48 @@ def write_chart_svg(transactions: list[dict], cumulative: list[float], path: Pat
             f"{escape(_fmt_tick(d))}</text>"
         )
 
-    # 数据点
-    point_elems: list[str] = []
-    for d, v in points:
-        point_elems.append(
-            f'<circle cx="{x_of(d):.2f}" cy="{y_of(v):.2f}" r="3.5" '
-            f'fill="#2563eb" stroke="#ffffff" stroke-width="1.5"/>'
-        )
+    cold_dots = _point_elems(cold_points, x_of, y_of, COLOR_COLD)
+    total_dots = _point_elems(total_points, x_of, y_of, COLOR_TOTAL)
 
-    title = "Cold wallet cumulative BTC"
+    # 图例（右上，三项）
+    legend_x = margin_left + plot_w - 168
+    legend_y = margin_top + 10
+    legend = (
+        f'<rect x="{legend_x - 8:.1f}" y="{legend_y - 4:.1f}" width="176" height="58" '
+        f'rx="4" fill="#ffffff" fill-opacity="0.92" stroke="#e5e7eb"/>'
+        f'<line x1="{legend_x:.1f}" y1="{legend_y + 8:.1f}" '
+        f'x2="{legend_x + 22:.1f}" y2="{legend_y + 8:.1f}" '
+        f'stroke="{COLOR_COLD}" stroke-width="2.5"/>'
+        f'<circle cx="{legend_x + 11:.1f}" cy="{legend_y + 8:.1f}" r="3" fill="{COLOR_COLD}"/>'
+        f'<text x="{legend_x + 28:.1f}" y="{legend_y + 12:.1f}" font-size="12" fill="#374151" '
+        f'font-family="Segoe UI, Helvetica, Arial, sans-serif">冷钱包累计</text>'
+        f'<line x1="{legend_x:.1f}" y1="{legend_y + 26:.1f}" '
+        f'x2="{legend_x + 22:.1f}" y2="{legend_y + 26:.1f}" '
+        f'stroke="{COLOR_TOTAL}" stroke-width="2.5"/>'
+        f'<circle cx="{legend_x + 11:.1f}" cy="{legend_y + 26:.1f}" r="3" fill="{COLOR_TOTAL}"/>'
+        f'<text x="{legend_x + 28:.1f}" y="{legend_y + 30:.1f}" font-size="12" fill="#374151" '
+        f'font-family="Segoe UI, Helvetica, Arial, sans-serif">全部持仓</text>'
+        f'<line x1="{legend_x:.1f}" y1="{legend_y + 44:.1f}" '
+        f'x2="{legend_x + 22:.1f}" y2="{legend_y + 44:.1f}" '
+        f'stroke="{COLOR_DCA}" stroke-width="1.75" stroke-dasharray="5 3"/>'
+        f'<text x="{legend_x + 28:.1f}" y="{legend_y + 48:.1f}" font-size="12" fill="#374151" '
+        f'font-family="Segoe UI, Helvetica, Arial, sans-serif">定投参考</text>'
+    )
+
+    title = "BTC cumulative: cold wallet & total holdings"
+    cold_line = (
+        f'<path d="{cold_path}" fill="none" stroke="{COLOR_COLD}" stroke-width="2.5" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        if cold_path
+        else ""
+    )
+    total_line = (
+        f'<path d="{total_path}" fill="none" stroke="{COLOR_TOTAL}" stroke-width="2.5" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        if total_path
+        else ""
+    )
+
     svg = f'''<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}">
   <rect width="100%" height="100%" fill="#ffffff"/>
@@ -235,35 +415,50 @@ def write_chart_svg(transactions: list[dict], cumulative: list[float], path: Pat
   <text x="16" y="{margin_top + plot_h / 2:.1f}" text-anchor="middle" font-size="12" fill="#374151"
         font-family="Segoe UI, Helvetica, Arial, sans-serif"
         transform="rotate(-90 16 {margin_top + plot_h / 2:.1f})">BTC</text>
-  <!-- line -->
-  {f'<path d="{path_d}" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>' if path_d else ""}
-  <!-- points -->
-  {"".join(point_elems)}
+  <!-- DCA reference diagonal (under data series) -->
+  {dca_line}
+  <!-- total holdings (orange) under cold so cold stays visible when equal -->
+  {total_line}
+  {"".join(total_dots)}
+  <!-- cold wallet (blue) -->
+  {cold_line}
+  {"".join(cold_dots)}
+  <!-- legend -->
+  {legend}
 </svg>
 '''
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(svg, encoding="utf-8")
 
 
-def chart_markdown(transactions: list[dict], cumulative: list[float]) -> str:
+def chart_markdown(
+    transactions: list[dict],
+    cumulative: list[float],
+    holdings_series: list[tuple[str, float]],
+) -> str:
     """写入 SVG 并返回 README 中引用图表的 Markdown。"""
-    write_chart_svg(transactions, cumulative, CHART_SVG_PATH)
-    # 相对路径，便于 GitHub 渲染；加 query 避免缓存旧图（用数据摘要）
-    total = cumulative[-1] if cumulative else 0.0
-    cache_bust = f"{len(transactions)}-{format_btc(total)}-{CHART_TARGET_DATE}"
+    write_chart_svg(transactions, cumulative, holdings_series, CHART_SVG_PATH)
+    cold_total = cumulative[-1] if cumulative else 0.0
+    holdings_total = holdings_series[-1][1] if holdings_series else 0.0
+    cache_bust = (
+        f"{len(transactions)}-{format_btc(cold_total)}-"
+        f"{len(holdings_series)}-{format_btc(holdings_total)}-{CHART_TARGET_DATE}"
+    )
     rel = CHART_SVG_PATH.relative_to(ROOT).as_posix()
     note = (
-        f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`（累计 0，尚未提现到冷钱包）；"
+        f"\n\n_起点为首次购买日 `{CHART_ORIGIN_DATE}`（累计 0）；"
+        f"**蓝线**为冷钱包提现累计，**橙线**为全部持仓（`holdings.csv` 快照时序）；"
+        f"**灰虚线**连接左下角与右上角，为定投参考（线性进度）；"
         f"横轴按真实时间比例，最右端为目标日 `{CHART_TARGET_DATE}`（**不绘制**数据点）；"
-        f"纵轴固定 0 → {GOAL_BTC} BTC。_"
+        f"纵轴默认 0 → {GOAL_BTC} BTC。_"
     )
-    if not transactions:
+    if not transactions and not holdings_series:
         note = (
-            f"\n\n_暂无冷钱包提现数据。图表起点为首次购买日 `{CHART_ORIGIN_DATE}`，"
+            f"\n\n_暂无数据。图表起点为首次购买日 `{CHART_ORIGIN_DATE}`，"
             f"横轴最右端为目标日 `{CHART_TARGET_DATE}`（仅作轴端）。_"
         )
     return (
-        f'![Cold wallet cumulative BTC]({rel}?v={cache_bust})\n'
+        f'![BTC cumulative cold wallet and total holdings]({rel}?v={cache_bust})\n'
         f"{note}"
     )
 
@@ -295,23 +490,59 @@ def build_table(transactions: list[dict], cumulative: list[float]) -> str:
     return "\n".join(lines)
 
 
-def build_auto_section(transactions: list[dict]) -> str:
+def build_holdings_table(holdings: list[dict]) -> str:
+    """全部持仓表：冷钱包 / 交易所等并列，含合计行。"""
+    if not holdings:
+        return (
+            "_暂无持仓快照。请在 `data/holdings.csv` 中按位置记录当前持仓"
+            "（`cold` / `exchange` 等）。_"
+        )
+
+    total = sum(h["btc"] for h in holdings)
+    # 快照日期：取各行中最新的 date
+    as_of = max(h["date"] for h in holdings)
+
+    lines = [
+        f"_快照日期：`{as_of}`_",
+        "",
+        "| 位置 | 持仓 (BTC) | 占比 | 备注 |",
+        "| --- | ---: | ---: | --- |",
+    ]
+    for h in holdings:
+        label = LOCATION_LABELS.get(h["location"], h["location"])
+        share = (h["btc"] / total * 100) if total > 0 else 0.0
+        lines.append(
+            f"| {label} | {format_btc(h['btc'])} | {share:.2f}% | {h['note']} |"
+        )
+    lines.append(
+        f"| **合计** | **{format_btc(total)}** | **100%** | 全部持仓 |"
+    )
+    return "\n".join(lines)
+
+
+def build_auto_section(
+    transactions: list[dict],
+    holdings: list[dict],
+    holdings_series: list[tuple[str, float]],
+) -> str:
     cumulative: list[float] = []
-    total = 0.0
+    cold_total = 0.0
     total_fiat_by_currency: dict[str, float] = {}
 
     for t in transactions:
-        total += t["btc"]
-        cumulative.append(total)
+        cold_total += t["btc"]
+        cumulative.append(cold_total)
         if t["fiat_amount"] is not None:
             cur = t["fiat_currency"] if t["fiat_currency"] != "—" else "UNKNOWN"
             total_fiat_by_currency[cur] = (
                 total_fiat_by_currency.get(cur, 0.0) + t["fiat_amount"]
             )
 
-    ratio = total / GOAL_BTC if GOAL_BTC else 0.0
+    holdings_total = sum(h["btc"] for h in holdings) if holdings else 0.0
+    # 进度以冷钱包累计为准（目标 0.1 BTC 的囤积进度）
+    ratio = cold_total / GOAL_BTC if GOAL_BTC else 0.0
     pct = ratio * 100
-    remaining = max(0.0, GOAL_BTC - total)
+    remaining = max(0.0, GOAL_BTC - cold_total)
     bar = progress_bar(ratio)
 
     fiat_lines = []
@@ -322,8 +553,8 @@ def build_auto_section(transactions: list[dict]) -> str:
 
     avg_cost_lines = []
     for cur, amount in sorted(total_fiat_by_currency.items()):
-        if total > 0:
-            avg = amount / total
+        if cold_total > 0:
+            avg = amount / cold_total
             # USD 均价按常见报价取整展示（如 $72040）
             if cur.upper() == "USD":
                 avg_cost_lines.append(
@@ -334,26 +565,42 @@ def build_auto_section(transactions: list[dict]) -> str:
                     f"- **平均成本 ({cur}/BTC)**: {avg:,.2f}"
                 )
 
+    holdings_as_of = max((h["date"] for h in holdings), default="—")
+    holdings_line = (
+        f"- **全部持仓合计**: {format_btc(holdings_total)} BTC"
+        f"（快照 `{holdings_as_of}`）"
+        if holdings
+        else "- **全部持仓合计**: —（见 `data/holdings.csv`）"
+    )
+
     updated = datetime.now().strftime("%Y-%m-%d %H:%M")
 
     parts = [
-        f"> 自动生成于 `{updated}` · 目标 **{GOAL_BTC} BTC** · 数据源 `data/transactions.csv`",
+        (
+            f"> 自动生成于 `{updated}` · 目标 **{GOAL_BTC} BTC** · "
+            f"数据源 `data/transactions.csv` + `data/holdings.csv`"
+        ),
         "",
         "## 进度总览",
         "",
-        f"**{format_btc(total)} / {GOAL_BTC} BTC**  ·  **{pct:.2f}%**",
+        f"**{format_btc(cold_total)} / {GOAL_BTC} BTC**  ·  **{pct:.2f}%**",
         "",
         f"`{bar}`",
         "",
-        f"- **冷钱包累计**: {format_btc(total)} BTC",
+        f"- **冷钱包累计**: {format_btc(cold_total)} BTC",
+        holdings_line,
         f"- **距离目标还差**: {format_btc(remaining)} BTC",
         f"- **提现笔数**: {len(transactions)}",
         *fiat_lines,
         *avg_cost_lines,
         "",
-        "## 冷钱包累计曲线",
+        "## 全部持仓",
         "",
-        chart_markdown(transactions, cumulative),
+        build_holdings_table(holdings),
+        "",
+        "## 累计曲线",
+        "",
+        chart_markdown(transactions, cumulative, holdings_series),
         "",
         "## 提现明细",
         "",
@@ -389,10 +636,16 @@ def update_readme(readme_path: Path, auto_body: str) -> None:
 
 def main() -> None:
     txs = load_transactions(CSV_PATH)
-    auto = build_auto_section(txs)
+    holdings = load_holdings(HOLDINGS_CSV_PATH)
+    holdings_series = load_holdings_series(HOLDINGS_CSV_PATH)
+    auto = build_auto_section(txs, holdings, holdings_series)
     update_readme(README_PATH, auto)
-    total = sum(t["btc"] for t in txs)
-    print(f"已更新 README.md：{len(txs)} 笔记录，合计 {format_btc(total)} BTC")
+    cold_total = sum(t["btc"] for t in txs)
+    holdings_total = sum(h["btc"] for h in holdings)
+    print(
+        f"已更新 README.md：冷钱包 {len(txs)} 笔 / {format_btc(cold_total)} BTC；"
+        f"持仓 {len(holdings)} 处 / 合计 {format_btc(holdings_total)} BTC"
+    )
 
 
 if __name__ == "__main__":
