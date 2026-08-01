@@ -19,8 +19,8 @@
   <!-- DCA reference diagonal (under data series) -->
   <line x1="64.00" y1="404.00" x2="892.00" y2="56.00" stroke="#9ca3af" stroke-width="1.75" stroke-dasharray="7 5" stroke-linecap="round"/>
   <!-- total holdings (orange) under cold so cold stays visible when equal -->
-  <path d="M64.00,404.00 L148.80,346.30" fill="none" stroke="#ea580c" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-  <circle cx="64.00" cy="404.00" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="148.80" cy="346.30" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/>
+  <path d="M64.00,404.00 L148.80,346.30 L154.50,343.07" fill="none" stroke="#ea580c" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="64.00" cy="404.00" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="148.80" cy="346.30" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="154.50" cy="343.07" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/>
   <!-- cold wallet (blue) -->
   <path d="M64.00,404.00 L116.02,385.80" fill="none" stroke="#2563eb" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
   <circle cx="64.00" cy="404.00" r="3.5" fill="#2563eb" stroke="#ffffff" stroke-width="1.5"/><circle cx="116.02" cy="385.80" r="3.5" fill="#2563eb" stroke="#ffffff" stroke-width="1.5"/>
