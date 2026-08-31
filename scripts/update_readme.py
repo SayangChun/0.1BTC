@@ -92,8 +92,8 @@ def load_transactions(path: Path) -> list[dict]:
 
 
 def load_holdings(path: Path) -> list[dict]:
-    """加载持仓快照。同一 location 多条时，取 date 最新的一条。"""
-    by_location: dict[str, dict] = {}
+    """加载所有持仓快照，按日期升序、位置顺序排列。"""
+    rows: list[dict] = []
     for raw in _read_csv_rows(path):
         date_s = (raw.get("date") or "").strip()
         loc = (raw.get("location") or "").strip().lower()
@@ -104,15 +104,12 @@ def load_holdings(path: Path) -> list[dict]:
             btc = float(btc_s)
         except ValueError:
             continue
-        row = {
+        rows.append({
             "date": date_s,
             "location": loc,
             "btc": btc,
             "note": (raw.get("note") or "").strip() or "—",
-        }
-        prev = by_location.get(loc)
-        if prev is None or date_s >= prev["date"]:
-            by_location[loc] = row
+        })
 
     def sort_key(r: dict) -> tuple:
         loc = r["location"]
@@ -120,15 +117,15 @@ def load_holdings(path: Path) -> list[dict]:
             idx = LOCATION_ORDER.index(loc)
         except ValueError:
             idx = len(LOCATION_ORDER)
-        return (idx, loc)
+        return (r["date"], idx, loc)
 
-    return sorted(by_location.values(), key=sort_key)
+    return sorted(rows, key=sort_key)
 
 
 def load_holdings_series(path: Path) -> list[tuple[str, float]]:
     """按日期汇总全部持仓时序。
 
-    同一日期更新若干 location；未出现在当日的 location 沿用上一次余额（carry-forward）。
+    同一日期更新若干 location；未出现在当日的 location 清零（不 carry-forward）。
     返回 [(date_str, total_btc), ...]，按日期升序，每个日期一点。
     """
     raw_rows: list[tuple[str, str, float]] = []
@@ -148,17 +145,17 @@ def load_holdings_series(path: Path) -> list[tuple[str, float]]:
         return []
 
     raw_rows.sort(key=lambda r: (r[0], r[1]))
-    balances: dict[str, float] = {}
     series: list[tuple[str, float]] = []
     i = 0
     n = len(raw_rows)
     while i < n:
         d = raw_rows[i][0]
+        day_total = 0.0
         while i < n and raw_rows[i][0] == d:
-            _, loc, btc = raw_rows[i]
-            balances[loc] = btc
+            _, _, btc = raw_rows[i]
+            day_total += btc
             i += 1
-        series.append((d, sum(balances.values())))
+        series.append((d, day_total))
     return series
 
 
@@ -466,31 +463,40 @@ def build_table(transactions: list[dict], cumulative: list[float]) -> str:
 
 
 def build_holdings_table(holdings: list[dict]) -> str:
-    """全部持仓表：冷钱包 / 交易所等并列，含合计行。"""
+    """全部持仓表：按日期分组展示历史快照。"""
     if not holdings:
         return (
-            "_暂无持仓快照。请在 `data/holdings.csv` 中按位置记录当前持仓"
-            "（`cold` / `exchange` 等）。_"
+            "_暂无持仓快照。请在 `data/holdings.csv` 中按位置记录当前持仓。_"
         )
 
-    total = sum(h["btc"] for h in holdings)
-    # 快照日期：取各行中最新的 date
-    as_of = max(h["date"] for h in holdings)
+    # 按日期分组
+    by_date: dict[str, list[dict]] = {}
+    for h in holdings:
+        d = h["date"]
+        if d not in by_date:
+            by_date[d] = []
+        by_date[d].append(h)
 
     lines = [
-        f"_快照日期：`{as_of}`_",
-        "",
-        "| 位置 | 持仓 (BTC) | 占比 | 备注 |",
-        "| --- | ---: | ---: | --- |",
+        "| 日期 | 位置 | 持仓 (BTC) | 备注 |",
+        "| --- | --- | ---: | --- |",
     ]
-    for h in holdings:
-        label = LOCATION_LABELS.get(h["location"], h["location"])
-        share = (h["btc"] / total * 100) if total > 0 else 0.0
-        lines.append(
-            f"| {label} | {format_btc(h['btc'])} | {share:.2f}% | {h['note']} |"
-        )
+
+    for date_str in sorted(by_date.keys()):
+        day_holdings = by_date[date_str]
+        day_total = sum(h["btc"] for h in day_holdings)
+        for i, h in enumerate(day_holdings):
+            label = LOCATION_LABELS.get(h["location"], h["location"])
+            date_col = date_str if i == 0 else ""
+            lines.append(
+                f"| {date_col} | {label} | {format_btc(h['btc'])} | {h['note']} |"
+            )
+
+    # 最新日期的合计
+    latest_date = max(by_date.keys())
+    latest_total = sum(h["btc"] for h in by_date[latest_date])
     lines.append(
-        f"| **合计** | **{format_btc(total)}** | **100%** | 全部持仓 |"
+        f"| **合计** | | **{format_btc(latest_total)}** | 最新持仓 |"
     )
     return "\n".join(lines)
 
@@ -500,16 +506,22 @@ def build_auto_section(
     holdings: list[dict],
     holdings_series: list[tuple[str, float]],
 ) -> str:
-    holdings_total = sum(h["btc"] for h in holdings) if holdings else 0.0
+    # 只计算最新日期的持仓
+    if holdings:
+        latest_date = max(h["date"] for h in holdings)
+        latest_holdings = [h for h in holdings if h["date"] == latest_date]
+    else:
+        latest_holdings = []
+    holdings_total = sum(h["btc"] for h in latest_holdings)
     # 进度以总持仓为准（目标 0.1 BTC 的囤积进度）
     ratio = holdings_total / GOAL_BTC if GOAL_BTC else 0.0
     pct = ratio * 100
     remaining = max(0.0, GOAL_BTC - holdings_total)
     bar = progress_bar(ratio)
 
-    # 计算各交易所的均价（从 holdings.csv 的 note 字段解析）
+    # 计算各交易所的均价（从最新日期的 holdings.csv 的 note 字段解析）
     avg_cost_lines = []
-    for h in holdings:
+    for h in latest_holdings:
         note = h.get("note", "")
         if "均价" in note:
             # 提取均价信息

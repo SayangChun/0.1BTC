@@ -19,8 +19,8 @@
   <!-- DCA reference diagonal (under data series) -->
   <line x1="64.00" y1="404.00" x2="892.00" y2="56.00" stroke="#9ca3af" stroke-width="1.75" stroke-dasharray="7 5" stroke-linecap="round"/>
   <!-- total holdings (orange) -->
-  <path d="M64.00,404.00 L175.87,332.14" fill="none" stroke="#ea580c" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
-  <circle cx="64.00" cy="404.00" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="175.87" cy="332.14" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/>
+  <path d="M64.00,404.00 L148.80,346.30 L154.50,343.07 L158.06,340.36 L168.03,335.59 L175.87,332.14" fill="none" stroke="#ea580c" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+  <circle cx="64.00" cy="404.00" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="148.80" cy="346.30" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="154.50" cy="343.07" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="158.06" cy="340.36" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="168.03" cy="335.59" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/><circle cx="175.87" cy="332.14" r="3.5" fill="#ea580c" stroke="#ffffff" stroke-width="1.5"/>
   <!-- legend -->
   <rect x="716.0" y="62.0" width="176" height="42" rx="4" fill="#ffffff" fill-opacity="0.92" stroke="#e5e7eb"/><line x1="724.0" y1="74.0" x2="746.0" y2="74.0" stroke="#ea580c" stroke-width="2.5"/><circle cx="735.0" cy="74.0" r="3" fill="#ea580c"/><text x="752.0" y="78.0" font-size="12" fill="#374151" font-family="Segoe UI, Helvetica, Arial, sans-serif">全部持仓</text><line x1="724.0" y1="92.0" x2="746.0" y2="92.0" stroke="#9ca3af" stroke-width="1.75" stroke-dasharray="5 3"/><text x="752.0" y="96.0" font-size="12" fill="#374151" font-family="Segoe UI, Helvetica, Arial, sans-serif">定投参考</text>
 </svg>
