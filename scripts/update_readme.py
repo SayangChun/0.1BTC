@@ -557,6 +557,9 @@ def build_auto_section(
 
     # 计算各交易所的均价（从最新日期的 holdings.csv 的 note 字段解析）
     avg_cost_lines = []
+    total_value_usd = 0.0
+    total_btc_with_price = 0.0
+    
     for h in latest_holdings:
         note = h.get("note", "")
         if "均价" in note:
@@ -566,11 +569,21 @@ def build_auto_section(
             if match:
                 avg_price = match.group(1).replace(",", "")
                 try:
+                    avg_price_float = float(avg_price)
+                    btc_amount = h["btc"]
                     avg_cost_lines.append(
-                        f"- **{LOCATION_LABELS.get(h['location'], h['location'])} 均价**: ${float(avg_price):,.1f}/BTC"
+                        f"- **{LOCATION_LABELS.get(h['location'], h['location'])} 均价**: ${avg_price_float:,.1f}/BTC"
                     )
+                    # 计算加权均价
+                    total_value_usd += btc_amount * avg_price_float
+                    total_btc_with_price += btc_amount
                 except ValueError:
                     pass
+    
+    # 计算全部持仓的加权均价
+    if total_btc_with_price > 0:
+        overall_avg_price = total_value_usd / total_btc_with_price
+        avg_cost_lines.append(f"- **全部持仓均价**: ${overall_avg_price:,.1f}/BTC")
 
     usd_rate = get_btc_usd_rate()
     cny_rate = get_usd_cny_rate()
