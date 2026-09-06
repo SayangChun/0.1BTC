@@ -11,7 +11,9 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
+import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from xml.sax.saxutils import escape
@@ -169,6 +171,30 @@ def format_btc(value: float) -> str:
     # 保留足够精度，去掉多余尾零
     s = f"{value:.8f}".rstrip("0").rstrip(".")
     return s if s else "0"
+
+
+def get_btc_usd_rate() -> float | None:
+    """获取 BTC/USD 实时汇率。"""
+    try:
+        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return float(data["bitcoin"]["usd"])
+    except Exception:
+        return None
+
+
+def get_usd_cny_rate() -> float | None:
+    """获取 USD/CNY 实时汇率。"""
+    try:
+        url = "https://open.er-api.com/v6/latest/USD"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return float(data["rates"]["CNY"])
+    except Exception:
+        return None
 
 
 def _parse_date(date_s: str) -> date:
@@ -495,8 +521,18 @@ def build_holdings_table(holdings: list[dict]) -> str:
     # 最新日期的合计
     latest_date = max(by_date.keys())
     latest_total = sum(h["btc"] for h in by_date[latest_date])
+
+    usd_rate = get_btc_usd_rate()
+    cny_rate = get_usd_cny_rate()
+    if usd_rate and cny_rate:
+        usd_value = latest_total * usd_rate
+        cny_value = usd_value * cny_rate
+        fiat_info = f"≈ ${usd_value:,.2f} / ¥{cny_value:,.2f}"
+    else:
+        fiat_info = "最新持仓"
+
     lines.append(
-        f"| **合计** | | **{format_btc(latest_total)}** | 最新持仓 |"
+        f"| **合计** | | **{format_btc(latest_total)}** | {fiat_info} |"
     )
     return "\n".join(lines)
 
@@ -536,6 +572,15 @@ def build_auto_section(
                 except ValueError:
                     pass
 
+    usd_rate = get_btc_usd_rate()
+    cny_rate = get_usd_cny_rate()
+    if usd_rate and cny_rate:
+        usd_value = holdings_total * usd_rate
+        cny_value = usd_value * cny_rate
+        fiat_str = f"（≈ ${usd_value:,.2f} / ¥{cny_value:,.2f}）"
+    else:
+        fiat_str = ""
+
     holdings_as_of = max((h["date"] for h in holdings), default="—")
 
     updated = datetime.now().strftime("%Y-%m-%d %H:%M")
@@ -552,7 +597,7 @@ def build_auto_section(
         "",
         f"`{bar}`",
         "",
-        f"- **全部持仓合计**: {format_btc(holdings_total)} BTC（快照 `{holdings_as_of}`）",
+        f"- **全部持仓合计**: {format_btc(holdings_total)} BTC{fiat_str}（快照 `{holdings_as_of}`）",
         f"- **距离目标还差**: {format_btc(remaining)} BTC",
         *avg_cost_lines,
         "",
