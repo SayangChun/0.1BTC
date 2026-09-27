@@ -6,7 +6,13 @@
 ---
 
 <!-- AUTO-GENERATED:START -->
-> 自动生成于 `2026-09-27 09:21` · 目标 **0.1 BTC** · 数据源 `data/holdings.csv`
+> 自动生成于 `2026-09-27 18:25` · 目标 **0.1 BTC** · 数据源 `data/holdings.csv`
+
+## 当前市值
+
+### ¥13,645.87
+
+≈ **$2,032.70** · 1 BTC = **¥570,399** / $84,967 · 持仓 **0.02392337 BTC** · 快照 `2026-09-27` · 价格更新于 `2026-09-27`
 
 ## 进度总览
 
@@ -14,7 +20,7 @@
 
 `█████░░░░░░░░░░░░░░░`
 
-- **全部持仓合计**: 0.02392337 BTC（快照 `2026-09-27`）
+- **全部持仓合计**: 0.02392337 BTC（≈ $2,032.70 / ¥13,645.87）（快照 `2026-09-27`）
 - **距离目标还差**: 0.07607663 BTC
 - **Binance 均价**: $68,694.1/BTC
 - **OKX 均价**: $68,139.8/BTC
@@ -42,7 +48,7 @@
 |  | OKX | 0.0152673 | OKX账户；均价 $68,158.3/BTC |
 | 2026-09-27 | Binance | 0.00864654 | Binance账户；均价 $68,694.15/BTC |
 |  | OKX | 0.01527683 | OKX账户；均价 $68,139.8/BTC |
-| **合计** | | **0.02392337** | 最新持仓 |
+| **合计** | | **0.02392337** | ≈ $2,032.70 / ¥13,645.87 |
 
 ## 累计曲线
 
@@ -73,19 +79,23 @@ _起点为首次购买日 `2026-03-27`（累计 0）；**橙线**为全部持仓
 
    同一 `location` 有多行时，脚本取**日期最新**的一条作为当前余额。
 
-2. 在项目根目录运行脚本，刷新进度、持仓表与图表：
+2. 在项目根目录运行脚本，刷新**当前市值**、进度、持仓表与图表：
 
    ```bash
    python scripts/update_readme.py
    ```
 
+   脚本会实时抓取 BTC 价格并把当日市值写入 [`data/prices.csv`](data/prices.csv)（`date,btc_usd,btc_cny,value_cny,value_usd`，同日覆盖），该文件**由脚本自动生成**，无需手动编辑；网络不可用时自动回退到最近一次快照。
+
 3. 提交并推送到 GitHub：
 
    ```bash
-   git add data/holdings.csv README.md assets/cumulative_btc.svg
+   git add data/holdings.csv data/prices.csv README.md assets/cumulative_btc.svg
    git commit -m "记录：更新持仓"
    git push
    ```
+
+> **每日自动更新**：GitHub Actions 工作流 [`.github/workflows/daily-market-value.yml`](.github/workflows/daily-market-value.yml) 每天北京时间 09:23 自动运行脚本，刷新 README 顶部的**当前市值（人民币）**并提交推送（无变化则跳过）。可在仓库 **Actions** 页面手动触发。
 
 图表为脚本生成的 SVG（`assets/cumulative_btc.svg`），横轴按**真实时间比例**绘制，GitHub 会在 README 中直接显示，无需部署任何网页。
 

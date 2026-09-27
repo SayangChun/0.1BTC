@@ -1,0 +1,37 @@
+name: 每日更新持仓市值
+
+on:
+  schedule:
+    # 每天 01:23 UTC（北京时间 09:23）刷新 BTC/CNY 价格与 README 市值
+    - cron: "23 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  update-market-value:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 刷新 README 当前市值
+        run: python scripts/update_readme.py
+
+      - name: 提交并推送（仅有变化时）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "内容无变化，跳过提交"
+          else
+            git commit -m "记录：更新每日持仓市值"
+            git push
+          fi

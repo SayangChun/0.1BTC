@@ -2,6 +2,8 @@
 """
 从 data/transactions.csv 读取冷钱包提现记录，
 从 data/holdings.csv 读取全部持仓快照，
+抓取 BTC/USD、BTC/CNY 实时价格生成「当前市值」，
+并把每日市值写入 data/prices.csv，
 更新 README.md 中的进度、持仓表与图表。
 
 用法（在项目根目录执行）:
@@ -13,6 +15,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import sys
 import urllib.request
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -21,6 +24,7 @@ from xml.sax.saxutils import escape
 ROOT = Path(__file__).resolve().parent.parent
 CSV_PATH = ROOT / "data" / "transactions.csv"
 HOLDINGS_CSV_PATH = ROOT / "data" / "holdings.csv"
+PRICES_CSV_PATH = ROOT / "data" / "prices.csv"
 README_PATH = ROOT / "README.md"
 CHART_SVG_PATH = ROOT / "assets" / "cumulative_btc.svg"
 GOAL_BTC = 0.1
@@ -173,28 +177,129 @@ def format_btc(value: float) -> str:
     return s if s else "0"
 
 
-def get_btc_usd_rate() -> float | None:
-    """获取 BTC/USD 实时汇率。"""
-    try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return float(data["bitcoin"]["usd"])
-    except Exception:
-        return None
+def _fetch_json(url: str, timeout: int = 10) -> dict:
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def get_usd_cny_rate() -> float | None:
-    """获取 USD/CNY 实时汇率。"""
+    """获取 USD/CNY 实时汇率（法币源）。"""
+    for url in (
+        "https://open.er-api.com/v6/latest/USD",
+        "https://api.frankfurter.app/latest?from=USD&to=CNY",
+    ):
+        try:
+            data = _fetch_json(url)
+            rate = data.get("rates", {}).get("CNY")
+            if rate:
+                return float(rate)
+        except Exception:
+            continue
+    return None
+
+
+def _btc_usd_from_exchange() -> float | None:
+    """交易所行情降级源：BTC/USDT。"""
+    for url in (
+        "https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT",
+        "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT",
+    ):
+        try:
+            data = _fetch_json(url)
+            if "data" in data:  # OKX
+                return float(data["data"][0]["last"])
+            return float(data["price"])  # Binance
+        except Exception:
+            continue
+    return None
+
+
+def get_market_rates() -> tuple[float | None, float | None]:
+    """获取 (BTC/USD, BTC/CNY)。
+
+    首选 CoinGecko 一次拿两种报价；失败时降级为交易所行情 + 法币汇率。
+    """
+    btc_usd = btc_cny = None
     try:
-        url = "https://open.er-api.com/v6/latest/USD"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            return float(data["rates"]["CNY"])
+        data = _fetch_json(
+            "https://api.coingecko.com/api/v3/simple/price"
+            "?ids=bitcoin&vs_currencies=usd,cny"
+        )
+        coin = data.get("bitcoin", {})
+        btc_usd = float(coin["usd"]) if coin.get("usd") else None
+        btc_cny = float(coin["cny"]) if coin.get("cny") else None
     except Exception:
-        return None
+        pass
+
+    if btc_usd is None or btc_cny is None:
+        btc_usd = btc_usd or _btc_usd_from_exchange()
+        usd_cny = get_usd_cny_rate()
+        if btc_usd and usd_cny and btc_cny is None:
+            btc_cny = btc_usd * usd_cny
+
+    return btc_usd, btc_cny
+
+
+def load_prices(path: Path) -> list[dict]:
+    """读取每日市值快照，按日期升序返回。"""
+    rows: list[dict] = []
+    for raw in _read_csv_rows(path):
+        date_s = (raw.get("date") or "").strip()
+        if not date_s:
+            continue
+        try:
+            btc_usd = float((raw.get("btc_usd") or "").strip())
+            btc_cny = float((raw.get("btc_cny") or "").strip())
+            value_cny = float((raw.get("value_cny") or "").strip())
+        except ValueError:
+            continue
+        try:
+            value_usd = float((raw.get("value_usd") or "").strip())
+        except ValueError:
+            value_usd = 0.0
+        rows.append(
+            {
+                "date": date_s,
+                "btc_usd": btc_usd,
+                "btc_cny": btc_cny,
+                "value_cny": value_cny,
+                "value_usd": value_usd,
+            }
+        )
+    rows.sort(key=lambda r: r["date"])
+    return rows
+
+
+def write_price_snapshot(
+    path: Path,
+    date_s: str,
+    btc_usd: float,
+    btc_cny: float,
+    value_cny: float,
+    value_usd: float,
+) -> None:
+    """写入当日市值快照（同日覆盖），保持按日期升序。"""
+    rows = [r for r in load_prices(path) if r["date"] != date_s]
+    rows.append(
+        {
+            "date": date_s,
+            "btc_usd": btc_usd,
+            "btc_cny": btc_cny,
+            "value_cny": value_cny,
+            "value_usd": value_usd,
+        }
+    )
+    rows.sort(key=lambda r: r["date"])
+
+    lines = ["date,btc_usd,btc_cny,value_cny,value_usd"]
+    for r in rows:
+        lines.append(
+            f'{r["date"]},{r["btc_usd"]:.2f},{r["btc_cny"]:.2f},'
+            f'{r["value_cny"]:.2f},{r["value_usd"]:.2f}'
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _parse_date(date_s: str) -> date:
@@ -488,7 +593,7 @@ def build_table(transactions: list[dict], cumulative: list[float]) -> str:
     return "\n".join(lines)
 
 
-def build_holdings_table(holdings: list[dict]) -> str:
+def build_holdings_table(holdings: list[dict], btc_usd: float | None, btc_cny: float | None) -> str:
     """全部持仓表：按日期分组展示历史快照。"""
     if not holdings:
         return (
@@ -522,12 +627,10 @@ def build_holdings_table(holdings: list[dict]) -> str:
     latest_date = max(by_date.keys())
     latest_total = sum(h["btc"] for h in by_date[latest_date])
 
-    usd_rate = get_btc_usd_rate()
-    cny_rate = get_usd_cny_rate()
-    if usd_rate and cny_rate:
-        usd_value = latest_total * usd_rate
-        cny_value = usd_value * cny_rate
-        fiat_info = f"≈ ${usd_value:,.2f} / ¥{cny_value:,.2f}"
+    if btc_usd and btc_cny:
+        fiat_info = (
+            f"≈ ${latest_total * btc_usd:,.2f} / ¥{latest_total * btc_cny:,.2f}"
+        )
     else:
         fiat_info = "最新持仓"
 
@@ -537,10 +640,53 @@ def build_holdings_table(holdings: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def build_market_value_section(
+    holdings_total: float,
+    btc_usd: float | None,
+    btc_cny: float | None,
+    holdings_as_of: str,
+    price_as_of: str,
+    price_live: bool,
+) -> list[str]:
+    """显眼的「当前市值」区块（人民币为主）。"""
+    if not (btc_usd and btc_cny):
+        return [
+            "## 当前市值",
+            "",
+            "_暂时无法获取实时价格（网络不可用且无历史快照）。_",
+            "",
+        ]
+
+    cny_value = holdings_total * btc_cny
+    usd_value = holdings_total * btc_usd
+    price_note = (
+        f"价格更新于 `{price_as_of}`"
+        if price_live
+        else f"价格取自快照 `{price_as_of}`（实时接口不可用）"
+    )
+    detail = (
+        f"≈ **${usd_value:,.2f}** · 1 BTC = **¥{btc_cny:,.0f}** / ${btc_usd:,.0f} · "
+        f"持仓 **{format_btc(holdings_total)} BTC** · "
+        f"快照 `{holdings_as_of}` · {price_note}"
+    )
+    return [
+        "## 当前市值",
+        "",
+        f"### ¥{cny_value:,.2f}",
+        "",
+        detail,
+        "",
+    ]
+
+
 def build_auto_section(
     transactions: list[dict],
     holdings: list[dict],
     holdings_series: list[tuple[str, float]],
+    btc_usd: float | None = None,
+    btc_cny: float | None = None,
+    price_as_of: str = "",
+    price_live: bool = True,
 ) -> str:
     # 只计算最新日期的持仓
     if holdings:
@@ -585,11 +731,11 @@ def build_auto_section(
         overall_avg_price = total_value_usd / total_btc_with_price
         avg_cost_lines.append(f"- **全部持仓均价**: ${overall_avg_price:,.1f}/BTC")
 
-    usd_rate = get_btc_usd_rate()
-    cny_rate = get_usd_cny_rate()
+    usd_rate = btc_usd
+    cny_rate = btc_cny
     if usd_rate and cny_rate:
         usd_value = holdings_total * usd_rate
-        cny_value = usd_value * cny_rate
+        cny_value = holdings_total * cny_rate
         fiat_str = f"（≈ ${usd_value:,.2f} / ¥{cny_value:,.2f}）"
     else:
         fiat_str = ""
@@ -604,6 +750,9 @@ def build_auto_section(
             f"数据源 `data/holdings.csv`"
         ),
         "",
+        *build_market_value_section(
+            holdings_total, btc_usd, btc_cny, holdings_as_of, price_as_of, price_live
+        ),
         "## 进度总览",
         "",
         f"**{format_btc(holdings_total)} / {GOAL_BTC} BTC**  ·  **{pct:.2f}%**",
@@ -616,7 +765,7 @@ def build_auto_section(
         "",
         "## 全部持仓",
         "",
-        build_holdings_table(holdings),
+        build_holdings_table(holdings, btc_usd, btc_cny),
         "",
         "## 累计曲线",
         "",
@@ -653,13 +802,59 @@ def update_readme(readme_path: Path, auto_body: str) -> None:
 def main() -> None:
     holdings = load_holdings(HOLDINGS_CSV_PATH)
     holdings_series = load_holdings_series(HOLDINGS_CSV_PATH)
-    auto = build_auto_section([], holdings, holdings_series)
-    update_readme(README_PATH, auto)
-    holdings_total = sum(h["btc"] for h in holdings)
-    print(
-        f"已更新 README.md：持仓 {len(holdings)} 处 / 合计 {format_btc(holdings_total)} BTC"
+
+    # 只统计最新快照日期的持仓
+    if holdings:
+        latest_date = max(h["date"] for h in holdings)
+        holdings_total = sum(h["btc"] for h in holdings if h["date"] == latest_date)
+    else:
+        latest_date = "—"
+        holdings_total = 0.0
+
+    btc_usd, btc_cny = get_market_rates()
+    price_live = bool(btc_usd and btc_cny)
+    price_as_of = date.today().isoformat()
+
+    if not price_live:
+        # 网络不可用：回退到最近一次价格快照，避免 README 中市值消失
+        snapshots = load_prices(PRICES_CSV_PATH)
+        if snapshots:
+            btc_usd = btc_usd or snapshots[-1]["btc_usd"]
+            btc_cny = btc_cny or snapshots[-1]["btc_cny"]
+            price_as_of = snapshots[-1]["date"]
+        else:
+            print("警告：无法获取实时价格，且没有历史价格快照可用")
+
+    if price_live and btc_usd and btc_cny:
+        # 仅实时价格才写入当日快照，避免把过期价格记成当天
+        write_price_snapshot(
+            PRICES_CSV_PATH,
+            price_as_of,
+            btc_usd,
+            btc_cny,
+            holdings_total * btc_cny,
+            holdings_total * btc_usd,
+        )
+
+    auto = build_auto_section(
+        [], holdings, holdings_series, btc_usd, btc_cny, price_as_of, price_live
     )
+    update_readme(README_PATH, auto)
+
+    msg = (
+        f"已更新 README.md：持仓 {len(holdings)} 处 / "
+        f"合计 {format_btc(holdings_total)} BTC"
+    )
+    if btc_cny:
+        msg += f" / 当前市值 ¥{holdings_total * btc_cny:,.2f}"
+    print(msg)
 
 
 if __name__ == "__main__":
+    # Windows 控制台默认 GBK，统一按 UTF-8 输出含 ¥ 的内容
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
     main()
