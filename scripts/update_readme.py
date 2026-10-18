@@ -622,6 +622,7 @@ def build_holdings_table(holdings: list[dict], btc_usd: float | None, btc_cny: f
             lines.append(
                 f"| {date_col} | {label} | {format_btc(h['btc'])} | {h['note']} |"
             )
+        lines.append(f"| | **当日合计** | **{format_btc(day_total)}** | |")
 
     # 最新日期的合计
     latest_date = max(by_date.keys())
