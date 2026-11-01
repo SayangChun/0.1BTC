@@ -6,3 +6,6 @@ venv/
 .env
 .DS_Store
 Thumbs.db
+
+# 本地工作记忆（不随仓库发布）
+.workbuddy-ai/
