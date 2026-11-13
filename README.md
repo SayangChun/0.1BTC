@@ -145,7 +145,7 @@ _起点为首次购买日 `2026-03-27`（累计 0）；**橙线**为全部持仓
    git push
    ```
 
-> **每日自动更新**：GitHub Actions 工作流 [`.github/workflows/daily-market-value.yml`](.github/workflows/daily-market-value.yml) 每天北京时间 09:23 自动运行脚本，刷新 README 顶部的**当前市值（人民币）**并提交推送（无变化则跳过）。可在仓库 **Actions** 页面手动触发。
+> **每日自动更新已停用**：原本的 GitHub Actions 工作流 [`.github/workflows/daily-market-value.yml`](.github/workflows/daily-market-value.yml) 会在北京时间 09:23 自动刷新市值，现已移除定时触发（仅保留手动触发）；持仓归零后自动刷新已无意义。需要更新 README 市值时，本地运行 `python scripts/update_readme.py`（见上方说明）或到仓库 **Actions** 页手动触发即可。
 
 图表为脚本生成的 SVG（`assets/cumulative_btc.svg`），横轴按**真实时间比例**绘制，GitHub 会在 README 中直接显示，无需部署任何网页。
 

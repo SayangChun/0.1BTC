@@ -1,9 +1,6 @@
 name: 每日更新持仓市值
 
 on:
-  schedule:
-    # 每天 01:23 UTC（北京时间 09:23）刷新 BTC/CNY 价格与 README 市值
-    - cron: "23 1 * * *"
   workflow_dispatch:
 
 permissions:
